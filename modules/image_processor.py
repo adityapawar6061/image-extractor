@@ -5,11 +5,15 @@ import io
 import logging
 from pathlib import Path
 
+import pillow_heif
 from PIL import Image
+
+# Register HEIF/HEIC opener with Pillow so Image.open() can handle them
+pillow_heif.register_heif_opener()
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp"}
+SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 
 
 def is_supported_image(filename: str) -> bool:
@@ -39,7 +43,7 @@ def load_and_encode_image(image_bytes: bytes, filename: str) -> str | None:
         elif img.mode == "L":
             img = img.convert("RGB")
 
-        # Encode to the format the user uploaded
+        # Convert HEIC/HEIF to JPEG (OpenAI doesn't accept HEIC directly)
         suffix = Path(filename).suffix.lower()
         fmt = "JPEG"
         media_type = "image/jpeg"
@@ -49,6 +53,7 @@ def load_and_encode_image(image_bytes: bytes, filename: str) -> str | None:
         elif suffix == ".webp":
             fmt = "WEBP"
             media_type = "image/webp"
+        # HEIC/HEIF → re-encode as JPEG (fallback case)
 
         buf = io.BytesIO()
         img.save(buf, format=fmt, quality=95)
@@ -69,6 +74,8 @@ def get_media_type(filename: str) -> str:
         ".jpeg": "image/jpeg",
         ".png": "image/png",
         ".webp": "image/webp",
+        ".heic": "image/jpeg",
+        ".heif": "image/jpeg",
     }
     return mapping.get(suffix, "image/jpeg")
 

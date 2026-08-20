@@ -216,8 +216,8 @@ st.caption("Extract table data from images using OpenAI Vision")
 # ---------------------------------------------------------------------------
 st.header("📷 Upload Images")
 uploaded_files = st.file_uploader(
-    "Upload JPG, JPEG, PNG, or WEBP images",
-    type=["jpg", "jpeg", "png", "webp"],
+    "Upload JPG, JPEG, PNG, WEBP, HEIC, or HEIF images",
+    type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
     accept_multiple_files=True,
     help="You can upload multiple images at once.",
 )

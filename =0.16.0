@@ -1,0 +1,7 @@
+Collecting pillow-heif
+  Downloading pillow_heif-1.5.0-cp314-cp314-win_amd64.whl.metadata (9.6 kB)
+Requirement already satisfied: pillow>=11.1.0 in C:\Users\adity\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages (from pillow-heif) (12.3.0)
+Downloading pillow_heif-1.5.0-cp314-cp314-win_amd64.whl (6.7 MB)
+   ---------------------------------------- 6.7/6.7 MB 9.3 MB/s  0:00:00
+Installing collected packages: pillow-heif
+Successfully installed pillow-heif-1.5.0
