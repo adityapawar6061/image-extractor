@@ -1,10 +1,12 @@
 """AI Image Data Extractor - Main Streamlit Application."""
 
 import asyncio
+import io
 import logging
 import os
 import sys
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +14,14 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from PIL import Image
+
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
 
 from modules.cost_tracker import CostTracker
 from modules.excel_exporter import build_csv, build_excel
@@ -55,7 +65,6 @@ _orig_log = logging.Logger.callHandlers
 
 def _safe_emit(record):
     if hasattr(record, "msg") and isinstance(record.msg, str):
-        # Scrub any API key patterns
         record.msg = record.msg.replace(
             st.session_state.get("api_key", ""), "***REDACTED***"
         ) if st.session_state.get("api_key") else record.msg
@@ -88,6 +97,12 @@ if "cost_tracker" not in st.session_state:
     st.session_state.cost_tracker = CostTracker()
 if "processing" not in st.session_state:
     st.session_state.processing = False
+if "show_converter" not in st.session_state:
+    st.session_state.show_converter = False
+if "converter_files" not in st.session_state:
+    st.session_state.converter_files = {}
+if "converted_zip" not in st.session_state:
+    st.session_state.converted_zip = None
 
 
 # ===========================================================================
@@ -106,7 +121,7 @@ with st.sidebar:
     if api_key:
         st.session_state.api_key = api_key
 
-    if st.button("🔑 Test API Key", use_container_width=True):
+    if st.button("🔑 Test API Key", width="stretch"):
         if not api_key:
             st.error("Please enter an API key first.")
         else:
@@ -199,18 +214,20 @@ with st.sidebar:
     st.header("🔄 TOOLS")
     st.divider()
 
-    st.page_link("pages/heic_converter.py", label="🔄 HEIC/HEIF → JPG Converter", icon="🔄", use_container_width=True)
+    if st.button("🔄 HEIC/HEIF → JPG Converter", width="stretch"):
+        st.session_state.show_converter = True
+        st.rerun()
 
     st.divider()
     st.header("📂 PROCESSING")
     st.divider()
 
-    if st.button("🔄 Resume Previous Job", use_container_width=True):
+    if st.button("🔄 Resume Previous Job", width="stretch"):
         st.session_state.processing_state = load_state()
         st.success("Previous state loaded!")
         st.rerun()
 
-    if st.button("🗑️ Start Fresh Job", use_container_width=True):
+    if st.button("🗑️ Start Fresh Job", width="stretch"):
         st.session_state.processing_state = reset_for_new_job(
             st.session_state.processing_state
         )
@@ -222,13 +239,199 @@ with st.sidebar:
 
 
 # ===========================================================================
+# HEIC/HEIF CONVERTER (toggle-able section)
+# ===========================================================================
+if st.session_state.show_converter:
+    st.title("🔄 HEIC/HEIF → JPG Converter")
+    st.caption("Convert thousands of HEIC/HEIF images to JPG in one click")
+
+    # Back button
+    if st.button("← Back to Data Extractor", width="stretch"):
+        st.session_state.show_converter = False
+        st.rerun()
+
+    # Settings
+    st.header("⚙️ Settings")
+    col_q, col_w = st.columns(2)
+    with col_q:
+        jpg_quality = st.slider("JPG Quality", 1, 100, 95, help="Higher = better quality, larger file size.")
+    with col_w:
+        max_width = st.number_input("Max width (px, 0 = no limit)", 0, step=100, help="Resize if wider. 0 = keep original.")
+
+    # Upload
+    st.header("📷 Upload Images")
+    uploaded_conv = st.file_uploader(
+        "Upload HEIC, HEIF, JPG, JPEG, PNG, or WEBP images",
+        type=["heic", "heif", "jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        help="You can upload 2000+ images at once.",
+        key="conv_uploader",
+    )
+
+    if uploaded_conv:
+        for uf in uploaded_conv:
+            if uf.name not in st.session_state.converter_files:
+                st.session_state.converter_files[uf.name] = uf.getvalue()
+
+        total_files = len(st.session_state.converter_files)
+        heic_count = sum(
+            1 for n in st.session_state.converter_files
+            if Path(n).suffix.lower() in (".heic", ".heif")
+        )
+        other_count = total_files - heic_count
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Files", total_files)
+        c2.metric("HEIC/HEIF", heic_count)
+        c3.metric("Other (passthrough)", other_count)
+
+        with st.expander(f"📋 View all files ({total_files})", expanded=False):
+            for i, name in enumerate(sorted(st.session_state.converter_files.keys()), 1):
+                ext = Path(name).suffix.lower()
+                icon = "🖼️" if ext in (".heic", ".heif") else "📄"
+                size_kb = len(st.session_state.converter_files[name]) / 1024
+                st.text(f"{i}. {icon} {name} ({size_kb:.0f} KB)")
+
+    # Convert
+    if st.session_state.converter_files:
+        st.header("🚀 Convert")
+        col_btn1, col_btn2 = st.columns(2)
+
+        with col_btn1:
+            convert_clicked = st.button(
+                f"⚡ Convert All ({len(st.session_state.converter_files)} files)",
+                width="stretch",
+                type="primary",
+            )
+
+        with col_btn2:
+            if st.button("🗑️ Clear All Files", width="stretch"):
+                st.session_state.converter_files = {}
+                st.session_state.converted_zip = None
+                st.rerun()
+
+        if convert_clicked:
+            files = st.session_state.converter_files
+            total = len(files)
+
+            progress_bar = st.progress(0, text="Starting conversion...")
+            status_text = st.empty()
+            stats_container = st.empty()
+
+            start_time = time.time()
+            converted_count = 0
+            failed_count = 0
+            total_bytes_original = 0
+            total_bytes_converted = 0
+
+            zip_buffer = io.BytesIO()
+
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                sorted_names = sorted(files.keys())
+
+                for i, filename in enumerate(sorted_names):
+                    img_bytes = files[filename]
+                    total_bytes_original += len(img_bytes)
+
+                    stem = Path(filename).stem
+                    out_name = f"{stem}.jpg"
+                    # Handle duplicate names
+                    if out_name in zf.namelist():
+                        idx = 1
+                        while f"{stem}_{idx}.jpg" in zf.namelist():
+                            idx += 1
+                        out_name = f"{stem}_{idx}.jpg"
+
+                    try:
+                        img = Image.open(io.BytesIO(img_bytes))
+
+                        # Convert to RGB (required for JPEG)
+                        if img.mode not in ("RGB", "L"):
+                            img = img.convert("RGB")
+                        elif img.mode == "L":
+                            img = img.convert("RGB")
+
+                        # Optional resize
+                        if max_width > 0 and img.width > max_width:
+                            ratio = max_width / img.width
+                            new_height = int(img.height * ratio)
+                            img = img.resize((max_width, new_height), Image.LANCZOS)
+
+                        # Save as JPEG
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=jpg_quality, optimize=True)
+                        jpg_bytes = buf.getvalue()
+                        total_bytes_converted += len(jpg_bytes)
+
+                        zf.writestr(out_name, jpg_bytes)
+                        converted_count += 1
+
+                    except Exception as e:
+                        logger.error("Failed to convert %s: %s", filename, e)
+                        failed_count += 1
+
+                    # Update progress
+                    pct = (i + 1) / total
+                    elapsed = time.time() - start_time
+                    speed = (i + 1) / elapsed if elapsed > 0 else 0
+                    remaining = (total - i - 1) / speed if speed > 0 else 0
+
+                    progress_bar.progress(
+                        pct,
+                        text=f"{i + 1}/{total} | "
+                        f"Elapsed: {elapsed:.0f}s | "
+                        f"ETA: {remaining:.0f}s | "
+                        f"Speed: {speed:.1f} files/s",
+                    )
+                    status_text.text(f"Converting: {filename}")
+
+            elapsed = time.time() - start_time
+            status_text.empty()
+            progress_bar.empty()
+
+            st.session_state.converted_zip = zip_buffer.getvalue()
+
+            # Show results
+            stats_container.success(
+                f"✅ Conversion complete!\n\n"
+                f"- **Converted:** {converted_count}\n"
+                f"- **Failed:** {failed_count}\n"
+                f"- **Time:** {elapsed:.1f}s\n"
+                f"- **Speed:** {converted_count / elapsed:.1f} files/s\n"
+                f"- **Original size:** {total_bytes_original / (1024*1024):.1f} MB\n"
+                f"- **Converted size:** {total_bytes_converted / (1024*1024):.1f} MB\n"
+                f"- **Compression:** {(1 - total_bytes_converted/total_bytes_original) * 100:.1f}% smaller"
+                if total_bytes_original > 0 else ""
+            )
+
+            # Clear uploaded files from memory after conversion
+            st.session_state.converter_files = {}
+            st.info("🧹 Uploaded files cleared from memory after conversion.")
+
+    # Download
+    if st.session_state.converted_zip:
+        st.header("📥 Download")
+        st.download_button(
+            label="⬇️ Download All JPGs (ZIP)",
+            data=st.session_state.converted_zip,
+            file_name="converted_images.zip",
+            mime="application/zip",
+            width="stretch",
+            type="primary",
+        )
+
+    st.divider()
+    st.caption("HEIC/HEIF → JPG Converter | Powered by Pillow + pillow-heif")
+
+    # STOP here — don't render the rest of the main app
+    st.stop()
+
+
+# ===========================================================================
 # MAIN PAGE
 # ===========================================================================
 st.title("📊 AI Image Data Extractor")
 st.caption("Extract table data from images using OpenAI Vision")
-
-# Navigation to converter
-st.page_link("pages/heic_converter.py", label="🔄 Open HEIC/HEIF → JPG Converter", icon="🔄")
 
 # ---------------------------------------------------------------------------
 # File upload
@@ -301,7 +504,7 @@ else:
     pc1, pc2, pc3 = st.columns(3)
 
     with pc1:
-        if st.button("▶️ Process Current Image", use_container_width=True):
+        if st.button("▶️ Process Current Image", width="stretch"):
             if not pending:
                 st.info("No pending images.")
             elif not api_key:
@@ -311,7 +514,7 @@ else:
                 st.rerun()
 
     with pc2:
-        if st.button("📸 Process Selected Images", use_container_width=True):
+        if st.button("📸 Process Selected Images", width="stretch"):
             if not pending:
                 st.info("No pending images.")
             elif not api_key:
@@ -322,7 +525,7 @@ else:
                 st.rerun()
 
     with pc3:
-        if st.button("🔄 Process All Images", use_container_width=True):
+        if st.button("🔄 Process All Images", width="stretch"):
             if not pending:
                 st.info("No pending images.")
             elif not api_key:
@@ -337,7 +540,7 @@ else:
     if failed_names:
         if st.button(
             f"🔁 Retry Failed Images ({len(failed_names)})",
-            use_container_width=True,
+            width="stretch",
         ):
             if not api_key:
                 st.error("Please enter your OpenAI API key in the sidebar.")
@@ -526,7 +729,7 @@ if all_results:
 
     st.dataframe(
         df_filtered[display_cols],
-        use_container_width=True,
+        width="stretch",
         height=400,
     )
 
@@ -545,7 +748,7 @@ if needs_review:
         df_review["review_reasons"] = df_review["review_reasons"].apply(
             lambda x: "; ".join(x) if isinstance(x, list) else str(x)
         )
-    st.dataframe(df_review[review_cols], use_container_width=True, height=300)
+    st.dataframe(df_review[review_cols], width="stretch", height=300)
 
 # ---------------------------------------------------------------------------
 # Failed Images
@@ -553,7 +756,7 @@ if needs_review:
 if failed_list:
     st.header("❌ Failed Images")
     df_failed = pd.DataFrame(failed_list)
-    st.dataframe(df_failed, use_container_width=True)
+    st.dataframe(df_failed, width="stretch")
 
 # ===========================================================================
 # DOWNLOADS
@@ -563,7 +766,7 @@ st.header("📥 Download Results")
 dl1, dl2 = st.columns(2)
 
 with dl1:
-    if st.button("📊 Download Excel", use_container_width=True):
+    if st.button("📊 Download Excel", width="stretch"):
         if all_results:
             summary = {
                 "total_images": len(all_filenames),
@@ -587,7 +790,7 @@ with dl1:
             st.info("No data to export yet.")
 
 with dl2:
-    if st.button("📄 Download CSV", use_container_width=True):
+    if st.button("📄 Download CSV", width="stretch"):
         if all_results:
             csv_str = build_csv(all_results, columns)
             st.download_button(
