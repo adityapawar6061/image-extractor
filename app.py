@@ -123,7 +123,17 @@ with st.sidebar:
 
     model = st.selectbox(
         "Model",
-        ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4.1"],
+        [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "gpt-4.1",
+            "gpt-4o-vision-preview",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+            "gpt-5.6-luna",
+        ],
         index=0,
         help="gpt-4o-mini is cost-efficient for high-volume extraction.",
     )
