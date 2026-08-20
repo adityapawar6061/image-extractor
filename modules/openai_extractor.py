@@ -16,20 +16,29 @@ from modules.image_processor import (
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT_TEMPLATE = """You are a precise data extraction system. Your ONLY job is to read the table in this image and extract every single row of data.
+EXTRACTION_PROMPT_TEMPLATE = """You are an EXTREMELY precise OCR data extraction system. Your ONLY job is to read the table in this image and extract every single row with ZERO errors.
 
-CRITICAL RULES:
-1. Read the ENTIRE image from top to bottom.
-2. Extract EVERY visible row. Do NOT skip any row.
-3. Do NOT merge two rows into one.
-4. Preserve numbers EXACTLY as they appear.
-5. Preserve names EXACTLY as visible.
-6. Preserve dates EXACTLY as visible.
-7. Preserve amounts EXACTLY as visible.
-8. If a value is missing, unclear, or unreadable, use null.
-9. Do NOT guess or hallucinate values.
-10. Maintain the original row order from top to bottom.
-11. Return ONLY valid JSON. No explanations, no markdown, no extra text.
+## CRITICAL OCR ACCURACY RULES:
+1. Read each digit and character INDIVIDUALLY. Do NOT guess or assume.
+2. For phone/mobile numbers (Indian format): MUST be EXACTLY 10 digits. If you see 11 digits, one digit is duplicated or wrong — identify and remove it. If you see 9 digits, one digit is missing — check carefully.
+3. For amounts/numbers: Read EACH digit one by one from left to right. Double-check by re-reading the digit. Common mistakes: 0↔6, 1↔7, 3↔8, 5↔6, 9↔0. AVOID these errors.
+4. For city names: Use TITLE CASE (e.g., "MUMBAI" not "mumbai", "ERNAKULAM" not "Ernakulam"). Match exactly what is written.
+5. For person names: Preserve EXACT spelling as written. Do NOT add or remove letters. Do NOT guess similar-sounding names.
+6. Preserve ALL digits in numbers exactly as they appear — no truncation, no extra digits.
+7. Preserve dates EXACTLY as visible (DD-MM-YYYY format).
+8. If a cell is truly unreadable, use null — but TRY HARD before giving up.
+9. Do NOT guess or hallucinate values. If unsure, use null.
+10. Read the ENTIRE image from top to bottom. Extract EVERY visible row. Do NOT skip any row.
+11. Do NOT merge two rows into one. Each row in the table = one row in the output.
+12. Maintain the original row order from top to bottom.
+13. Return ONLY valid JSON. No explanations, no markdown, no extra text.
+
+## DOUBLE-CHECK BEFORE RETURNING:
+- Re-read every phone number digit-by-digit
+- Re-read every amount digit-by-digit
+- Verify city names are spelled correctly
+- Verify person names match exactly
+- Count total rows — make sure you have all of them
 
 The user wants to extract these columns: {columns}
 
@@ -38,7 +47,7 @@ The user wants to extract these columns: {columns}
 Return a JSON array of objects. Each object represents one row.
 Example format:
 [
-  {{"Number": "12345", "City": "MUMBAI", "Name": "John Doe", "Date": "01-01-2024", "Amount": "15000"}},
+  {{"Number": "1234567890", "City": "MUMBAI", "Name": "John Doe", "Date": "03-01-2022", "Amount": "15000"}},
   ...
 ]
 

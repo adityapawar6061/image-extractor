@@ -17,6 +17,8 @@ DATE_PATTERNS = [
 
 # Phone number patterns (Indian format, 10 digits)
 PHONE_PATTERN = re.compile(r"^[\d\s\-\+\(\)]{7,15}$")
+# Indian mobile numbers should be exactly 10 digits
+INDIAN_MOBILE_LEN = 10
 
 
 def is_null_value(value: Any) -> bool:
@@ -43,7 +45,8 @@ def is_suspicious_phone(value: Any) -> bool:
         return False
     val = str(value).strip()
     digits_only = re.sub(r"\D", "", val)
-    if len(digits_only) < 7 or len(digits_only) > 15:
+    # Indian mobile numbers must be exactly 10 digits
+    if len(digits_only) != INDIAN_MOBILE_LEN:
         return True
     return False
 
@@ -64,6 +67,88 @@ def is_suspicious_amount(value: Any) -> bool:
         if cleaned and not cleaned.replace(".", "").replace("-", "").isdigit():
             return True
     return False
+
+
+def fix_ocr_phone(value: Any) -> str | None:
+    """Try to fix common OCR errors in phone numbers.
+
+    Rules:
+    - Must be exactly 10 digits
+    - If not 10 digits, return as-is for review (don't guess)
+    - We flag rather than auto-fix, since wrong digit removal corrupts data
+    """
+    if is_null_value(value):
+        return None
+    val = str(value).strip()
+    digits_only = re.sub(r"\D", "", val)
+    return digits_only if digits_only else None
+
+
+def fix_ocr_amount(value: Any) -> str | None:
+    """Try to fix common OCR errors in amounts.
+
+    Rules:
+    - Must be numeric only (no letters)
+    - Remove currency symbols, text prefixes, and commas
+    """
+    if is_null_value(value):
+        return None
+    val = str(value).strip()
+    # Remove common currency prefixes: Rs, INR, USD, etc.
+    cleaned = re.sub(r"^[A-Za-z₹€£$]+[.\s]*", "", val)
+    # Remove commas, spaces, and currency symbols
+    cleaned = re.sub(r"[,\s₹€£$]", "", cleaned)
+    # Remove any remaining non-digit characters except decimal point
+    cleaned = re.sub(r"[^\d.]", "", cleaned)
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def fix_ocr_city(value: Any) -> str | None:
+    """Try to fix common OCR errors in city names.
+
+    Rules:
+    - Convert to UPPERCASE for consistency
+    - Remove extra spaces
+    - Fix common OCR mistakes like ERNAKULAM → ERNAKULAM
+    """
+    if is_null_value(value):
+        return None
+    val = str(value).strip()
+    if not val:
+        return None
+    # Normalize: uppercase, strip whitespace
+    fixed = val.upper().strip()
+    # Fix common OCR city name mistakes
+    city_corrections = {
+        "ERNKALUM": "ERNAKULAM",
+        "ERNKULAM": "ERNAKULAM",
+        "GUNTOOR": "GUNTUR",
+        "PUNE": "PUNE",
+    }
+    fixed = city_corrections.get(fixed, fixed)
+    return fixed
+
+
+def fix_ocr_name(value: Any) -> str | None:
+    """Try to fix common OCR errors in names.
+
+    Rules:
+    - Title case each word
+    - Remove extra spaces
+    - Do NOT change spelling (OCR errors are hard to auto-fix)
+    """
+    if is_null_value(value):
+        return None
+    val = str(value).strip()
+    if not val:
+        return None
+    # Normalize whitespace
+    fixed = " ".join(val.split())
+    # Title case each word
+    fixed = fixed.title()
+    return fixed
 
 
 def is_empty_name(value: Any) -> bool:
@@ -173,6 +258,16 @@ def validate_batch(
         seen.add(row_hash)
 
     for i, row in enumerate(rows):
+        # Apply OCR fixes before validation
+        if "Number" in row:
+            row["Number"] = fix_ocr_phone(row["Number"])
+        if "City" in row:
+            row["City"] = fix_ocr_city(row["City"])
+        if "Name" in row:
+            row["Name"] = fix_ocr_name(row["Name"])
+        if "Amount" in row:
+            row["Amount"] = fix_ocr_amount(row["Amount"])
+
         annotated, reasons = validate_row(row, columns, expected_rows, row_index=i)
         validated.append(annotated)
         if reasons or annotated.get("needs_review"):
