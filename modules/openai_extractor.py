@@ -141,12 +141,19 @@ async def extract_single_image(
     last_error = None
     for attempt in range(max_retries):
         try:
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.0,
-                max_completion_tokens=16000,
-            )
+            # Build API kwargs — newer models reject temperature and max_tokens
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": 16000,
+            }
+            # Only set temperature for models that support it
+            # Models like gpt-4.1*, gpt-5* only accept default temperature=1
+            _newer_models = ("gpt-4.1", "gpt-5")
+            if not any(m in model for m in _newer_models):
+                kwargs["temperature"] = 0.0
+
+            response = await client.chat.completions.create(**kwargs)
 
             content = response.choices[0].message.content or ""
             usage = response.usage

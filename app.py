@@ -332,6 +332,7 @@ if st.session_state.show_converter:
         if convert_clicked:
             files = st.session_state.converter_files
             total = len(files)
+            MAX_PART_BYTES = 490 * 1024 * 1024  # 490 MB per part
 
             progress_bar = st.progress(0, text="Starting conversion...")
             status_text = st.empty()
@@ -343,74 +344,120 @@ if st.session_state.show_converter:
             total_bytes_original = 0
             total_bytes_converted = 0
 
-            zip_buffer = io.BytesIO()
+            # Convert all images first, collect (name, jpg_bytes) pairs
+            all_converted = []
+            sorted_names = sorted(files.keys())
+            used_names = set()
 
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                sorted_names = sorted(files.keys())
+            for i, filename in enumerate(sorted_names):
+                img_bytes = files[filename]
+                total_bytes_original += len(img_bytes)
 
-                for i, filename in enumerate(sorted_names):
-                    img_bytes = files[filename]
-                    total_bytes_original += len(img_bytes)
+                stem = Path(filename).stem
+                out_name = f"{stem}.jpg"
+                # Handle duplicate names
+                if out_name in used_names:
+                    idx = 1
+                    while f"{stem}_{idx}.jpg" in used_names:
+                        idx += 1
+                    out_name = f"{stem}_{idx}.jpg"
+                used_names.add(out_name)
 
-                    stem = Path(filename).stem
-                    out_name = f"{stem}.jpg"
-                    # Handle duplicate names
-                    if out_name in zf.namelist():
-                        idx = 1
-                        while f"{stem}_{idx}.jpg" in zf.namelist():
-                            idx += 1
-                        out_name = f"{stem}_{idx}.jpg"
+                try:
+                    img = Image.open(io.BytesIO(img_bytes))
 
-                    try:
-                        img = Image.open(io.BytesIO(img_bytes))
+                    # Convert to RGB (required for JPEG)
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    elif img.mode == "L":
+                        img = img.convert("RGB")
 
-                        # Convert to RGB (required for JPEG)
-                        if img.mode not in ("RGB", "L"):
-                            img = img.convert("RGB")
-                        elif img.mode == "L":
-                            img = img.convert("RGB")
+                    # Optional resize
+                    if max_width > 0 and img.width > max_width:
+                        ratio = max_width / img.width
+                        new_height = int(img.height * ratio)
+                        img = img.resize((max_width, new_height), Image.LANCZOS)
 
-                        # Optional resize
-                        if max_width > 0 and img.width > max_width:
-                            ratio = max_width / img.width
-                            new_height = int(img.height * ratio)
-                            img = img.resize((max_width, new_height), Image.LANCZOS)
+                    # Save as JPEG
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=jpg_quality, optimize=True)
+                    jpg_bytes = buf.getvalue()
+                    total_bytes_converted += len(jpg_bytes)
 
-                        # Save as JPEG
-                        buf = io.BytesIO()
-                        img.save(buf, format="JPEG", quality=jpg_quality, optimize=True)
-                        jpg_bytes = buf.getvalue()
-                        total_bytes_converted += len(jpg_bytes)
+                    all_converted.append((out_name, jpg_bytes))
+                    converted_count += 1
 
-                        zf.writestr(out_name, jpg_bytes)
-                        converted_count += 1
+                except Exception as e:
+                    logger.error("Failed to convert %s: %s", filename, e)
+                    failed_count += 1
 
-                    except Exception as e:
-                        logger.error("Failed to convert %s: %s", filename, e)
-                        failed_count += 1
+                # Update progress (conversion phase)
+                pct = (i + 1) / total
+                elapsed = time.time() - start_time
+                speed = (i + 1) / elapsed if elapsed > 0 else 0
+                remaining = (total - i - 1) / speed if speed > 0 else 0
 
-                    # Update progress
-                    pct = (i + 1) / total
-                    elapsed = time.time() - start_time
-                    speed = (i + 1) / elapsed if elapsed > 0 else 0
-                    remaining = (total - i - 1) / speed if speed > 0 else 0
+                progress_bar.progress(
+                    pct,
+                    text=f"Converting: {i + 1}/{total} | "
+                    f"Elapsed: {elapsed:.0f}s | "
+                    f"ETA: {remaining:.0f}s | "
+                    f"Speed: {speed:.1f} files/s",
+                )
 
-                    progress_bar.progress(
-                        pct,
-                        text=f"{i + 1}/{total} | "
-                        f"Elapsed: {elapsed:.0f}s | "
-                        f"ETA: {remaining:.0f}s | "
-                        f"Speed: {speed:.1f} files/s",
-                    )
-                    status_text.text(f"Converting: {filename}")
+            # --- Split into parts under 490 MB ---
+            status_text.text("📦 Packaging into ZIP parts...")
+            progress_bar.progress(1.0, text="Packaging ZIP parts...")
+
+            zip_parts = []  # list of bytes
+            current_part = io.BytesIO()
+            current_part_size = 0
+            current_names = []
+            ZIP_HEADER_OVERHEAD = 1024 * 1024  # 1 MB overhead for zip headers
+
+            def _finalize_part(part_buf, names):
+                """Close the zip and return the bytes."""
+                part_buf.seek(0)
+                return part_buf.getvalue()
+
+            zf = zipfile.ZipFile(current_part, "w", zipfile.ZIP_DEFLATED)
+
+            for out_name, jpg_bytes in all_converted:
+                # Estimate compressed size (rough: ~70% of original for JPEG)
+                est_size = len(jpg_bytes) + ZIP_HEADER_OVERHEAD
+
+                # Check if adding this file would exceed the limit
+                if current_part_size + est_size > MAX_PART_BYTES and current_names:
+                    # Close current part and start a new one
+                    zf.close()
+                    zip_parts.append(_finalize_part(current_part, current_names))
+                    current_part = io.BytesIO()
+                    current_part_size = 0
+                    current_names = []
+                    zf = zipfile.ZipFile(current_part, "w", zipfile.ZIP_DEFLATED)
+
+                zf.writestr(out_name, jpg_bytes)
+                current_names.append(out_name)
+                current_part_size += est_size
+
+            # Finalize last part
+            if current_names:
+                zf.close()
+                zip_parts.append(_finalize_part(current_part, current_names))
+            else:
+                zf.close()
 
             elapsed = time.time() - start_time
             status_text.empty()
             progress_bar.empty()
 
-            st.session_state.converted_zip = zip_buffer.getvalue()
+            st.session_state.converted_parts = zip_parts
+            st.session_state.converted_part_count = len(zip_parts)
 
             # Show results
+            part_sizes = [len(p) / (1024*1024) for p in zip_parts]
+            parts_info = " | ".join(f"Part {i+1}: {s:.1f} MB" for i, s in enumerate(part_sizes))
+
             stats_container.success(
                 f"✅ Conversion complete!\n\n"
                 f"- **Converted:** {converted_count}\n"
@@ -419,7 +466,8 @@ if st.session_state.show_converter:
                 f"- **Speed:** {converted_count / elapsed:.1f} files/s\n"
                 f"- **Original size:** {total_bytes_original / (1024*1024):.1f} MB\n"
                 f"- **Converted size:** {total_bytes_converted / (1024*1024):.1f} MB\n"
-                f"- **Compression:** {(1 - total_bytes_converted/total_bytes_original) * 100:.1f}% smaller"
+                f"- **Compression:** {(1 - total_bytes_converted/total_bytes_original) * 100:.1f}% smaller\n"
+                f"- **ZIP parts:** {len(zip_parts)} ({parts_info})"
                 if total_bytes_original > 0 else ""
             )
 
@@ -428,16 +476,32 @@ if st.session_state.show_converter:
             st.info("🧹 Uploaded files cleared from memory after conversion.")
 
     # Download
-    if st.session_state.converted_zip:
+    if st.session_state.get("converted_parts"):
         st.header("📥 Download")
-        st.download_button(
-            label="⬇️ Download All JPGs (ZIP)",
-            data=st.session_state.converted_zip,
-            file_name="converted_images.zip",
-            mime="application/zip",
-            width="stretch",
-            type="primary",
-        )
+        parts = st.session_state.converted_parts
+        total_parts = len(parts)
+
+        if total_parts == 1:
+            st.download_button(
+                label=f"⬇️ Download JPGs ({len(parts[0]) / (1024*1024):.0f} MB)",
+                data=parts[0],
+                file_name="converted_images.zip",
+                mime="application/zip",
+                width="stretch",
+                type="primary",
+            )
+        else:
+            st.info(f"📦 {total_parts} ZIP parts — download each one below:")
+            for idx, part_bytes in enumerate(parts, 1):
+                size_mb = len(part_bytes) / (1024*1024)
+                st.download_button(
+                    label=f"⬇️ Part {idx}/{total_parts} ({size_mb:.0f} MB)",
+                    data=part_bytes,
+                    file_name=f"converted_images_part{idx}.zip",
+                    mime="application/zip",
+                    width="stretch",
+                    type="primary" if idx == 1 else "secondary",
+                )
 
     st.divider()
     st.caption("HEIC/HEIF → JPG Converter | Powered by Pillow + pillow-heif")
