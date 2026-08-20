@@ -237,6 +237,25 @@ with st.sidebar:
         st.success("State cleared!")
         st.rerun()
 
+    if st.button("🧹 Clear All Cache & Data", width="stretch"):
+        import shutil
+
+        # Clear everything: session state, files, converter cache
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        # Delete processing state file
+        state_file = Path("processing_state.json")
+        if state_file.exists():
+            state_file.unlink()
+        # Delete all result/failed/upload JSON files
+        for subdir in ("data/results", "data/failed", "data/uploads"):
+            sub = Path(subdir)
+            if sub.exists():
+                shutil.rmtree(sub)
+                sub.mkdir(parents=True, exist_ok=True)
+        st.success("All cache and data cleared!")
+        st.rerun()
+
 
 # ===========================================================================
 # HEIC/HEIF CONVERTER (toggle-able section)

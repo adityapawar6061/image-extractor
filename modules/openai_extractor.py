@@ -145,7 +145,7 @@ async def extract_single_image(
                 model=model,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=16000,
+                max_completion_tokens=16000,
             )
 
             content = response.choices[0].message.content or ""
