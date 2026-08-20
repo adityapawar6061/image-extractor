@@ -199,8 +199,7 @@ with st.sidebar:
     st.header("🔄 TOOLS")
     st.divider()
 
-    if st.button("🔄 HEIC/HEIF → JPG Converter", use_container_width=True):
-        st.switch_page("pages/heic_converter.py")
+    st.page_link("pages/heic_converter.py", label="🔄 HEIC/HEIF → JPG Converter", icon="🔄", use_container_width=True)
 
     st.divider()
     st.header("📂 PROCESSING")
@@ -229,11 +228,7 @@ st.title("📊 AI Image Data Extractor")
 st.caption("Extract table data from images using OpenAI Vision")
 
 # Navigation to converter
-st.markdown(
-    "---\n"
-    "🔄 **Need to convert HEIC/HEIF images to JPG first?** "
-    "[Open HEIC Converter](heic_converter)"
-)
+st.page_link("pages/heic_converter.py", label="🔄 Open HEIC/HEIF → JPG Converter", icon="🔄")
 
 # ---------------------------------------------------------------------------
 # File upload

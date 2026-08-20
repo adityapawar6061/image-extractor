@@ -52,8 +52,7 @@ with st.sidebar:
     )
 
     st.divider()
-    if st.button("🏠 Back to Main App", use_container_width=True):
-        st.switch_page("app.py")
+    st.page_link("app.py", label="🏠 Back to Main App", icon="🏠", use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # Main page
